@@ -34,28 +34,38 @@ class IconAnimator {
     private var currentLoopCount = 0
 
     /// Stores the completion block passed to `startAnimation`
-    private var completion: (() -> Void)? = nil
+    private var completion: (([CGFloat]) -> Void)? = nil
 
     /// Whether or not this animation has been cancelled
     private var isCancelled = false
+    
+    private var initialIcon: String
+    
+    private var currentStopFrame = 0
+    
+    private var frameTimeGap: [CGFloat] = []
 
     init(numberOfFrames: Int,
          numberOfLoops: Int = 1,
          targetFramesPerSecond: CGFloat = 30,
-         shouldRunOnMainThread: Bool = false) {
+         shouldRunOnMainThread: Bool = false,
+         initialIcon: String = "ba00000") {
         self.numberOfFrames = numberOfFrames
         self.targetFramesPerSecond = targetFramesPerSecond
         self.shouldRunOnMainThread = shouldRunOnMainThread
         self.numberOfLoops = numberOfLoops
+        self.initialIcon = initialIcon
     }
 
     /// Starts a new app icon animation. Can be called multiple times.
-    func startAnimation(completion: (() -> Void)? = nil) {
+    func startAnimation(currentStopFrame: Int? = 0, completion: (([CGFloat]) -> Void)? = nil) {
         // Set/reset properties
-        animationStartTime = CACurrentMediaTime()
+        animationStartTime = CFAbsoluteTimeGetCurrent()
         currentLoopCount = 0
         isCancelled = false
         self.completion = completion
+        self.frameTimeGap = []
+        self.currentStopFrame = currentStopFrame ?? 0
 
         // Start the animation, either using the main thread loop
         // or timer, depending on configuration
@@ -69,7 +79,14 @@ class IconAnimator {
     /// Cancel the current animation, if any
     func cancel() {
         isCancelled = true
-        completion?()
+        appProxy.setAlternateIconName(initialIcon) { success, error in
+            if !success || error != nil {
+                print("Error: \(error as Any)")
+                return
+            }
+        }
+        completion?(self.frameTimeGap)
+        self.currentStopFrame = 0
     }
 
     /// Runs the icon animation using a `CFRunLoopTimer`
@@ -102,14 +119,14 @@ class IconAnimator {
             }
 
             // On every frame, update our icon
-            let shouldContinue = self.updateFrame()
+//            let shouldContinue = self.updateFrame()
 
             // If we've reached our last frame,
             // invalidate the timer and call our completion block
-            if (!shouldContinue) {
-                CFRunLoopTimerInvalidate(timer)
-                self.completion?()
-            }
+ //           if (!shouldContinue) {
+ //               CFRunLoopTimerInvalidate(timer)
+ //               self.completion?(self.currentStopFrame)
+ //           }
         }
 
         // Start the timer
@@ -127,9 +144,13 @@ class IconAnimator {
         // (starting with 0, meaning we're ready to show the
         // first frame immediately)
         var lastFrameTime: CFTimeInterval = 0
-
-        DispatchQueue.main.async {
-            while (true) {
+        
+        DispatchQueue.global(qos: .background).async {
+            // is end for callback flag
+            var keepLoop = true
+            // render icon success flag
+            var nextFrame = true
+            while (keepLoop) {
                 // If our animation has been cancelled,
                 // break out of our loop immediately
                 if self.isCancelled {
@@ -152,10 +173,17 @@ class IconAnimator {
                 // If we've reached our last frame,
                 // call our completion block and break
                 // out of our loop
-                let shouldContinue = self.updateFrame()
-                if (!shouldContinue) {
-                    self.completion?()
-                    break
+                self.updateFrame(){ [weak self] shouldContinue in
+                    if (!shouldContinue) {
+                        keepLoop = false
+                        self?.completion?(self!.frameTimeGap)
+                    }else{
+                        nextFrame = true
+                    }
+                }
+                nextFrame = false
+                while(!nextFrame){
+                    Thread.sleep(forTimeInterval: 1.8)
                 }
             }
         }
@@ -167,37 +195,54 @@ class IconAnimator {
 
      - returns A boolean value indicating whether this animation still has more frames to display
      */
-    private func updateFrame() -> Bool {
+    private func updateFrame(frameDone: @escaping (Bool) -> Void) {
         // Determine the frame we _should_ be showing
         // based on the current time. This allows the animation
         // to continue smoothly even if some frames are dropped
-        let timeSinceStart = CACurrentMediaTime() - animationStartTime
-        let currentFrame = Int(timeSinceStart * targetFramesPerSecond) % numberOfFrames
-
+        let startTime = CFAbsoluteTimeGetCurrent()
+        let frameDone = frameDone
+        // let timeSinceStart = startTime - animationStartTime
+        // let currentFrame = Int(timeSinceStart * targetFramesPerSecond) % numberOfFrames
+        let currentFrame = (self.currentStopFrame + 1) % numberOfFrames
+        
         // Determine the name of the icon to show
-        let iconName = String(format: "BeachBall%03d", currentFrame);
-
+        let iconName = String(format: "ba%05d", currentFrame);
+        //let iconName = String(format: "BeachBall%03d", currentFrame);
+        
+        //        print(timeSinceStart)
+        //        print(currentFrame)
+        //        print(iconName)
+        
         // Use `LSApplicationProxy.setAlternateIconName` to update
         // our icon (which allows us to skip the user-facing alert
         // and update even when we're in the backtround)
         appProxy.setAlternateIconName(iconName) { success, error in
             if !success || error != nil {
                 print("Error: \(error as Any)")
+                frameDone(false)
                 return
             }
-        }
-
-        // If we've reached the end of a loop...
-        if currentFrame == 0 {
-            // Check if we've looped as many times as we'd like.
-            // If so, return `false` to indicate that we're done animating
-            if currentLoopCount == numberOfLoops {
-                return false
+            if success {
+                self.frameTimeGap.append(CFAbsoluteTimeGetCurrent() - startTime)
+                print(CFAbsoluteTimeGetCurrent() - startTime)
+                print(currentFrame)
+                // If we've reached the end of a loop...
+                if currentFrame == 0 {
+                    // Check if we've looped as many times as we'd like.
+                    // If so, return `false` to indicate that we're done animating
+                    if self.currentLoopCount == self.numberOfLoops {
+                        frameDone(false)
+                    }else{
+                        self.currentStopFrame = currentFrame
+                        self.currentLoopCount += 1
+                        frameDone(true)
+                    }
+                }else{
+                    self.currentStopFrame = currentFrame
+                    frameDone(success)
+                }
             }
-            currentLoopCount += 1
         }
-
-        return true
     }
 
 }
